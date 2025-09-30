@@ -8,9 +8,9 @@ import os
 app = Flask(__name__)
 
 # 2. Configuração do Banco de Dados
-db_url = os.environ.get('DATABASE_URL')
-if not db_url:
-    raise RuntimeError("A variável de ambiente DATABASE_URL não foi encontrada.")
+
+db_url = "postgresql://postgres.fkxwoaixpxwyeqbmkisp:K9pWzL7jR2mXbV4qGfA3sE8h@aws-1-sa-east-1.pooler.supabase.com:6543/postgres"
+
 
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -57,3 +57,4 @@ def get_cobrancas():
         }), 200
     except Exception as e:
         return jsonify({"status": "error", "message": f"Erro ao acessar o banco de dados: {str(e)}"}), 500
+
