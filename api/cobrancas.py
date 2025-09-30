@@ -31,16 +31,21 @@ with app.app_context():
 # A rota da API
 @app.route('/api/cobrancas', methods=['GET'])
 def get_cobrancas():
-    # Lógica para buscar cobranças do banco de dados virá aqui
-    # Por enquanto, apenas retornamos uma mensagem de sucesso
-    return jsonify({
-        "status": "success",
-        "message": "API de cobranças está funcionando!",
-        "data": [] 
-    }), 200
+    try:
+        # Busca todas as cobranças no banco de dados
+        cobrancas_db = Cobranca.query.order_by(Cobranca.data_criacao.desc()).all()
+        
+        # Converte os objetos de cobrança para dicionários
+        cobrancas_list = [cobranca.to_dict() for cobranca in cobrancas_db]
+        
+        return jsonify({
+            "status": "success",
+            "message": "Cobranças recuperadas com sucesso!",
+            "data": cobrancas_list
+        }), 200
+    except Exception as e:
+        # Se algo der errado, retorna um erro 500 com a mensagem
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-# Esta rota é opcional, mas boa para testar a raiz
-@app.route('/', methods=['GET'])
-def index():
-    return "Servidor Flask está no ar!"
+
 
