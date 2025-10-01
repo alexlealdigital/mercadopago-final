@@ -1,99 +1,178 @@
-document.addEventListener('DOMContentLoaded', () => {
-    // Seleciona o formulário de criação de cobrança
-    const formCobranca = document.getElementById('form-cobranca');
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistema de Cobrança - Mercado Pago</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <h1 class="logo">
+                    <i class="fas fa-credit-card"></i>
+                    Sistema de Cobrança
+                </h1>
+                <nav class="nav">
+                    <button class="nav-btn active" data-tab="criar">
+                        <i class="fas fa-plus"></i>
+                        Nova Cobrança
+                    </button>
+                    <button class="nav-btn" data-tab="listar">
+                        <i class="fas fa-list"></i>
+                        Cobranças
+                    </button>
+                </nav>
+            </div>
+        </div>
+    </header>
 
-    // Seleciona a área para mostrar o resultado (modal)
-    const modal = document.getElementById('modal-detalhes');
-    const modalBody = document.getElementById('modal-body');
-    const modalClose = document.querySelector('.modal-close');
+    <!-- Main Content -->
+    <main class="main">
+        <div class="container">
+            <!-- Tab: Nova Cobrança -->
+            <section id="tab-criar" class="tab-content active">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>
+                            <i class="fas fa-plus-circle"></i>
+                            Criar Nova Cobrança
+                        </h2>
+                        <p>Preencha os dados abaixo para gerar uma nova cobrança via Mercado Pago</p>
+                    </div>
+                    
+                    <form id="form-cobranca" class="form">
+                        <div class="form-section">
+                            <h3>
+                                <i class="fas fa-user"></i>
+                                Dados do Cliente
+                            </h3>
+                            
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="cliente_nome">Nome Completo *</label>
+                                    <input type="text" id="cliente_nome" name="cliente_nome" required>
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label for="cliente_email">Email *</label>
+                                    <input type="email" id="cliente_email" name="cliente_email" required>
+                                </div>
+                            </div>
+                            
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="cliente_telefone">Telefone</label>
+                                    <input type="tel" id="cliente_telefone" name="cliente_telefone" placeholder="(11) 99999-9999">
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label for="cliente_documento">CPF/CNPJ</label>
+                                    <input type="text" id="cliente_documento" name="cliente_documento" placeholder="000.000.000-00">
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="form-section">
+                            <h3>
+                                <i class="fas fa-shopping-cart"></i>
+                                Dados da Cobrança
+                            </h3>
+                            
+                            <div class="form-group">
+                                <label for="titulo">Título/Produto *</label>
+                                <input type="text" id="titulo" name="titulo" required placeholder="Ex: Consultoria em Marketing Digital">
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="descricao">Descrição</label>
+                                <textarea id="descricao" name="descricao" rows="3" placeholder="Descrição detalhada do produto ou serviço"></textarea>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="valor">Valor (R$) *</label>
+                                <input type="number" id="valor" name="valor" step="0.01" min="0.01" required placeholder="0,00">
+                            </div>
+                        </div>
+                        
+                        <div class="form-actions">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fas fa-paper-plane"></i>
+                                Criar Cobrança
+                            </button>
+                            <button type="reset" class="btn btn-secondary">
+                                <i class="fas fa-undo"></i>
+                                Limpar
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </section>
 
-    // Adiciona um "ouvinte" para o ENVIO do formulário
-    formCobranca.addEventListener('submit', async (event) => {
-        // Previne o comportamento padrão do formulário (que é recarregar a página)
-        event.preventDefault();
+            <!-- Tab: Listar Cobranças -->
+            <section id="tab-listar" class="tab-content">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>
+                            <i class="fas fa-list"></i>
+                            Cobranças Criadas
+                        </h2>
+                        <div class="filters">
+                            <select id="filter-status" class="filter-select">
+                                <option value="">Todos os Status</option>
+                                <option value="pending">Pendente</option>
+                                <option value="approved">Aprovado</option>
+                                <option value="rejected">Rejeitado</option>
+                                <option value="cancelled">Cancelado</option>
+                            </select>
+                            <button id="btn-refresh" class="btn btn-secondary">
+                                <i class="fas fa-sync-alt"></i>
+                                Atualizar
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div id="loading" class="loading" style="display: none;">
+                        <i class="fas fa-spinner fa-spin"></i>
+                        Carregando...
+                    </div>
+                    
+                    <div id="cobrancas-container" class="cobrancas-container">
+                        <!-- Cobranças serão carregadas aqui via JavaScript -->
+                    </div>
+                    
+                    <div id="pagination" class="pagination">
+                        <!-- Paginação será gerada aqui -->
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
 
-        // Pega os dados do formulário
-        const formData = new FormData(formCobranca);
-        const dadosCobranca = Object.fromEntries(formData.entries());
+    <!-- Modal para detalhes da cobrança -->
+    <div id="modal-detalhes" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Detalhes da Cobrança</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body" id="modal-body">
+                <!-- Conteúdo será preenchido via JavaScript -->
+            </div>
+        </div>
+    </div>
 
-        // Mostra uma mensagem de "carregando"
-        showLoadingInModal();
+    <!-- Toast para notificações -->
+    <div id="toast" class="toast">
+        <div class="toast-content">
+            <span class="toast-icon"></span>
+            <span class="toast-message"></span>
+        </div>
+    </div>
 
-        try {
-            // CHAMA A NOSSA API (MÉTODO POST)
-            const response = await fetch('/api/cobrancas', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                // Envia todos os dados do formulário para o backend
-                body: JSON.stringify(dadosCobranca),
-            });
-
-            const result = await response.json();
-
-            if (response.ok) {
-                // SUCESSO! Mostra o QR Code no Modal
-                showQrCodeInModal(result);
-            } else {
-                // Se a API retornar um erro
-                throw new Error(result.message || 'Ocorreu um erro ao gerar a cobrança.');
-            }
-
-        } catch (error) {
-            // Se houver um erro de rede ou na API
-            showErrorInModal(error.message);
-        }
-    });
-
-    // Funções auxiliares para controlar o Modal
-    function showLoadingInModal() {
-        modalBody.innerHTML = '<p>Gerando sua cobrança, aguarde...</p>';
-        modal.style.display = 'block';
-    }
-
-    function showQrCodeInModal(data) {
-        modalBody.innerHTML = `
-            <h2>Pague com PIX para confirmar!</h2>
-            <img src="data:image/jpeg;base64,${data.qr_code_base64}" alt="PIX QR Code" style="max-width: 100%;">
-            <p>Ou copie e cole o código:</p>
-            <textarea readonly style="width: 100%; min-height: 100px;">${data.qr_code_text}</textarea>
-        `;
-    }
-
-    function showErrorInModal(message) {
-        modalBody.innerHTML = `<p style="color: red;"><b>Erro:</b> ${message}</p>`;
-        modal.style.display = 'block';
-    }
-
-    // Fecha o modal ao clicar no 'X'
-    modalClose.addEventListener('click', () => {
-        modal.style.display = 'none';
-    });
-
-    // Fecha o modal ao clicar fora dele
-    window.addEventListener('click', (event) => {
-        if (event.target == modal) {
-            modal.style.display = 'none';
-        }
-    });
-
-    // Lógica para trocar de abas (já que seu HTML tem isso)
-    const navButtons = document.querySelectorAll('.nav-btn');
-    const tabContents = document.querySelectorAll('.tab-content');
-
-    navButtons.forEach(button => {
-        button.addEventListener('click', () => {
-            // Remove a classe 'active' de todos
-            navButtons.forEach(btn => btn.classList.remove('active'));
-            tabContents.forEach(tab => tab.classList.remove('active'));
-
-            // Adiciona 'active' ao botão e tab clicados
-            button.classList.add('active');
-            document.getElementById(`tab-${button.dataset.tab}`).classList.add('active');
-        });
-    });
-
-    // A função para carregar a lista de cobranças pode ser adicionada aqui depois
-    // Por enquanto, vamos focar em criar a cobrança.
-});
+    <script src="script.js"></script>
+</body>
+</html>
