@@ -59,40 +59,6 @@ def get_cobrancas():
     except Exception as e:
         return jsonify({"status": "error", "message": f"Erro ao acessar o banco de dados: {str(e)}"}), 500
 
-# 7. Definição da Rota POST para CRIAR cobranças
-@app.route('/api/cobrancas', methods=['POST'])
-def create_cobranca():
-    try:
-        # Pega os dados enviados pelo frontend
-        dados = request.get_json()
-
-        # Validação simples (pode ser melhorada depois)
-        if not dados or not dados.get('external_reference') or not dados.get('cliente_nome'):
-            return jsonify({"status": "error", "message": "Dados incompletos."}), 400
-
-        # Cria um novo objeto Cobranca
-        nova_cobranca = Cobranca(
-            external_reference=dados['external_reference'],
-            cliente_nome=dados['cliente_nome'],
-            cliente_email=dados.get('cliente_email'),
-            valor=dados.get('valor'),
-            status=dados.get('status', 'pending')
-        )
-
-        # Adiciona ao banco de dados
-        db.session.add(nova_cobranca)
-        db.session.commit()
-
-        return jsonify({
-            "status": "success",
-            "message": "Cobrança criada com sucesso!",
-            "data": nova_cobranca.to_dict()
-        }), 201 # 201 significa "Created"
-    
-    except Exception as e:
-        db.session.rollback() # Desfaz a transação em caso de erro
-        return jsonify({"status": "error", "message": f"Erro ao criar cobrança: {str(e)}"}), 500
-
 # ROTA PARA CRIAR UMA NOVA COBRANÇA (MÉTODO POST)
 @app.route('/api/cobrancas', methods=['POST'])
 def create_cobranca():
@@ -151,9 +117,6 @@ def create_cobranca():
         db.session.rollback()
         # Retorna uma mensagem de erro clara se algo falhar
         return jsonify({"status": "error", "message": f"Erro ao criar cobrança no Mercado Pago: {str(e)}"}), 500
-
-
-
 
 
 
