@@ -1,5 +1,6 @@
 from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
+from flask_cors import CORS
 from datetime import datetime
 import json
 import os
@@ -8,10 +9,16 @@ import mercadopago
 # 1. Inicialização do Flask
 app = Flask(__name__)
 
-# 2. Configuração do Banco de Dados
+# 2. Configuração de CORS para permitir requisições do frontend
+CORS(app, origins="*")
 
-db_url = "postgresql://postgres.fkxwoaixpxwyeqbmkisp:K9pWzL7jR2mXbV4qGfA3sE8h@aws-1-sa-east-1.pooler.supabase.com:6543/postgres"
+# 3. Configuração do Banco de Dados
+# Usa PostgreSQL em produção ou SQLite em desenvolvimento
+db_url = os.environ.get('DATABASE_URL', 'sqlite:///cobrancas.db')
 
+# Fix para Heroku PostgreSQL URL
+if db_url.startswith('postgres://'):
+    db_url = db_url.replace('postgres://', 'postgresql://', 1)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -63,19 +70,36 @@ def get_cobrancas():
 @app.route('/api/cobrancas', methods=['POST'])
 def create_cobranca():
     try:
-        # 1. Pega o email que o cliente digitou no site
+        # 1. Pega os dados enviados pelo frontend
         dados = request.get_json()
+        
+        # Debug: Log dos dados recebidos
+        print(f"Dados recebidos: {dados}")
+        
+        # Validação melhorada dos campos obrigatórios
+        if not dados:
+            return jsonify({"status": "error", "message": "Nenhum dado foi enviado."}), 400
+            
         email_cliente = dados.get('email')
-
+        nome_cliente = dados.get('nome', 'Cliente do E-book')
+        
         if not email_cliente:
             return jsonify({"status": "error", "message": "O email é obrigatório."}), 400
 
+        # Validação básica de email
+        if '@' not in email_cliente or '.' not in email_cliente:
+            return jsonify({"status": "error", "message": "Por favor, insira um email válido."}), 400
+
         # 2. Prepara para falar com o Mercado Pago
-        sdk = mercadopago.SDK(os.environ.get('MERCADOPAGO_ACCESS_TOKEN'))
+        access_token = os.environ.get('MERCADOPAGO_ACCESS_TOKEN')
+        if not access_token:
+            return jsonify({"status": "error", "message": "Token do Mercado Pago não configurado."}), 500
+            
+        sdk = mercadopago.SDK(access_token)
 
         # 3. Define os detalhes do produto (seu e-book)
-        valor_ebook = 19.99  # Defina o preço aqui
-        descricao_ebook = "Seu E-book Incrível" # Defina a descrição aqui
+        valor_ebook = float(dados.get('valor', 19.99))  # Permite valor customizado ou usa padrão
+        descricao_ebook = dados.get('titulo', "Seu E-book Incrível")  # Permite título customizado
 
         payment_data = {
             "transaction_amount": valor_ebook,
@@ -88,16 +112,22 @@ def create_cobranca():
 
         # 4. ENVIA A ORDEM PARA O MERCADO PAGO
         payment_response = sdk.payment().create(payment_data)
+        
+        # Verifica se a resposta do Mercado Pago foi bem-sucedida
+        if payment_response["status"] != 201:
+            error_msg = payment_response.get("response", {}).get("message", "Erro desconhecido do Mercado Pago")
+            return jsonify({"status": "error", "message": f"Erro do Mercado Pago: {error_msg}"}), 500
+            
         payment = payment_response["response"]
 
         # 5. Pega o QR Code que o Mercado Pago retornou
         qr_code_base64 = payment['point_of_interaction']['transaction_data']['qr_code_base64']
         qr_code_text = payment['point_of_interaction']['transaction_data']['qr_code']
 
-        # (Opcional, mas bom) Salva um registro no seu banco de dados
+        # 6. Salva um registro no seu banco de dados
         nova_cobranca = Cobranca(
             external_reference=str(payment['id']),
-            cliente_nome="Cliente do E-book",
+            cliente_nome=nome_cliente,
             cliente_email=email_cliente,
             valor=valor_ebook,
             status=payment['status']
@@ -105,19 +135,42 @@ def create_cobranca():
         db.session.add(nova_cobranca)
         db.session.commit()
 
-        # 6. ENVIA O QR CODE DE VOLTA PARA O SITE
+        # 7. ENVIA O QR CODE DE VOLTA PARA O SITE
         return jsonify({
             "status": "success",
-            "message": "Cobrança PIX criada!",
+            "message": "Cobrança PIX criada com sucesso!",
             "qr_code_base64": qr_code_base64,
-            "qr_code_text": qr_code_text
+            "qr_code_text": qr_code_text,
+            "payment_id": payment['id'],
+            "valor": valor_ebook
         }), 201
 
     except Exception as e:
         db.session.rollback()
+        # Log do erro para debug
+        print(f"Erro ao criar cobrança: {str(e)}")
         # Retorna uma mensagem de erro clara se algo falhar
-        return jsonify({"status": "error", "message": f"Erro ao criar cobrança no Mercado Pago: {str(e)}"}), 500
+        return jsonify({"status": "error", "message": f"Erro ao criar cobrança: {str(e)}"}), 500
 
+# Rota para verificar se a API está funcionando
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "success", "message": "API funcionando corretamente!"}), 200
 
+# Rota raiz para verificação
+@app.route('/', methods=['GET'])
+def root():
+    return jsonify({
+        "status": "success", 
+        "message": "Sistema de Cobrança - API Backend",
+        "version": "1.0.0",
+        "endpoints": [
+            "GET /api/health - Health check",
+            "POST /api/cobrancas - Criar cobrança",
+            "GET /api/cobrancas - Listar cobranças"
+        ]
+    }), 200
 
-
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(debug=False, host='0.0.0.0', port=port)
