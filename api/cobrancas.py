@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
 import json
@@ -91,6 +91,7 @@ def create_cobranca():
     except Exception as e:
         db.session.rollback() # Desfaz a transação em caso de erro
         return jsonify({"status": "error", "message": f"Erro ao criar cobrança: {str(e)}"}), 500
+
 
 
 
