@@ -1,7 +1,11 @@
+Flask
+mercadopago
+Flask-SQLAlchemy
+psycopg2-binary
+Flask-Cors
 Flask==3.0.0
 Flask-SQLAlchemy==3.1.1
 Flask-CORS==4.0.0
 mercadopago==2.2.1
 psycopg2-binary==2.9.9
 gunicorn==21.2.0
-python-dotenv
