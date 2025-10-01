@@ -13,7 +13,8 @@ load_dotenv()
 from src.models.user import db
 from src.models.cobranca import Cobranca
 from src.routes.user import user_bp
-from src.routes.cobranca import cobranca_bp
+# from src.routes.cobranca import cobranca_bp # Remover esta importação
+from api.cobranca_bp import cobranca_bp, db as cobranca_db # Importar o blueprint e o db do novo arquivo
 from src.routes.backup import backup_bp
 
 app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), 'static'))
@@ -24,15 +25,16 @@ CORS(app)
 # Configurações
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'asdf#FGSgvasgf$5$WGT')
 
-# Registrar blueprints
-app.register_blueprint(user_bp, url_prefix='/api')
-app.register_blueprint(cobranca_bp, url_prefix='/api')
-app.register_blueprint(backup_bp, url_prefix='/api')
-
 # Configuração do banco de dados
-app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(os.path.dirname(__file__), 'database', 'app.db')}"
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', f"sqlite:///{os.path.join(os.path.dirname(__file__), 'database', 'app.db')}")
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
+cobranca_db.init_app(app) # Inicializar o db do blueprint com o app principal
+
+# Registrar blueprints
+app.register_blueprint(user_bp, url_prefix='/api')
+app.register_blueprint(cobranca_bp, url_prefix='/api') # Registrar o novo blueprint
+app.register_blueprint(backup_bp, url_prefix='/api')
 
 # Criar tabelas
 with app.app_context():
