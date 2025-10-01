@@ -3,6 +3,7 @@ from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
 import json
 import os
+import mercadopago
 
 # 1. Inicialização do Flask
 app = Flask(__name__)
@@ -91,6 +92,68 @@ def create_cobranca():
     except Exception as e:
         db.session.rollback() # Desfaz a transação em caso de erro
         return jsonify({"status": "error", "message": f"Erro ao criar cobrança: {str(e)}"}), 500
+
+# ROTA PARA CRIAR UMA NOVA COBRANÇA (MÉTODO POST)
+@app.route('/api/cobrancas', methods=['POST'])
+def create_cobranca():
+    try:
+        # 1. Pega o email que o cliente digitou no site
+        dados = request.get_json()
+        email_cliente = dados.get('email')
+
+        if not email_cliente:
+            return jsonify({"status": "error", "message": "O email é obrigatório."}), 400
+
+        # 2. Prepara para falar com o Mercado Pago
+        sdk = mercadopago.SDK(os.environ.get('MERCADOPAGO_ACCESS_TOKEN'))
+
+        # 3. Define os detalhes do produto (seu e-book)
+        valor_ebook = 19.99  # Defina o preço aqui
+        descricao_ebook = "Seu E-book Incrível" # Defina a descrição aqui
+
+        payment_data = {
+            "transaction_amount": valor_ebook,
+            "description": descricao_ebook,
+            "payment_method_id": "pix",
+            "payer": {
+                "email": email_cliente
+            }
+        }
+
+        # 4. ENVIA A ORDEM PARA O MERCADO PAGO
+        payment_response = sdk.payment().create(payment_data)
+        payment = payment_response["response"]
+
+        # 5. Pega o QR Code que o Mercado Pago retornou
+        qr_code_base64 = payment['point_of_interaction']['transaction_data']['qr_code_base64']
+        qr_code_text = payment['point_of_interaction']['transaction_data']['qr_code']
+
+        # (Opcional, mas bom) Salva um registro no seu banco de dados
+        nova_cobranca = Cobranca(
+            external_reference=str(payment['id']),
+            cliente_nome="Cliente do E-book",
+            cliente_email=email_cliente,
+            valor=valor_ebook,
+            status=payment['status']
+        )
+        db.session.add(nova_cobranca)
+        db.session.commit()
+
+        # 6. ENVIA O QR CODE DE VOLTA PARA O SITE
+        return jsonify({
+            "status": "success",
+            "message": "Cobrança PIX criada!",
+            "qr_code_base64": qr_code_base64,
+            "qr_code_text": qr_code_text
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        # Retorna uma mensagem de erro clara se algo falhar
+        return jsonify({"status": "error", "message": f"Erro ao criar cobrança no Mercado Pago: {str(e)}"}), 500
+
+
+
 
 
 
