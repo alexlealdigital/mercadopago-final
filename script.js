@@ -40,7 +40,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             // CHAMA A NOSSA API (MÉTODO POST)
-          const response = await fetch(\'https://g8h3ilc390yq.manus.space/api/cobrancas\', {
+          const response = await fetch('https://g8h3ilc390yq.manus.space/api/cobrancas', {
+
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
