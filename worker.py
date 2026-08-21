@@ -5,7 +5,6 @@ Processa webhooks do Mercado Pago, entrega produtos e registra vendas no Supabas
 """
 
 import os
-import logging
 import mercadopago
 import smtplib
 import redis
@@ -13,19 +12,10 @@ import requests
 import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from rq import Worker, Queue
+from rq import Worker, Queue 
 from datetime import datetime, timedelta
 from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
-
-# ============================================
-# LOGGING
-# ============================================
-logging.basicConfig(
-    level=os.environ.get("LOG_LEVEL", "INFO"),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger("broostore.worker")
 
 # ============================================
 # CONFIGURAÇÃO DO FLASK / DB LOCAL
@@ -47,12 +37,7 @@ db = SQLAlchemy(app)
 # ============================================
 # CONFIGURAÇÃO SUPABASE
 # ============================================
-# ANTES: SUPABASE_URL tinha um valor fixo hardcoded como fallback. Removido
-# por consistência com app.py — mesmo não sendo um segredo, um projeto
-# Supabase errado/antigo nunca deveria ser usado "silenciosamente".
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-if not SUPABASE_URL:
-    raise RuntimeError("SUPABASE_URL não configurada. Defina a variável de ambiente antes de iniciar o worker.")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://gyepvrzkwesohbagpgfa.supabase.co")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
 # ============================================
@@ -68,7 +53,6 @@ class Cobranca(db.Model):
     status = db.Column(db.String(50), default="pending", nullable=False)
     data_criacao = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     product_id = db.Column(db.Integer, db.ForeignKey('produtos.id'), nullable=True)
-    cupom_id = db.Column(db.Integer, db.ForeignKey('cupons.id'), nullable=True)  # NOVO: p/ debitar uso na entrega
     observacoes = db.Column(db.Text, nullable=True)  # JSON com endereco/frete do pedido fisico
     produto = db.relationship('Produto')
     chave_usada = db.relationship('ChaveLicenca', backref='cobranca_rel', uselist=False)
@@ -91,13 +75,6 @@ class ChaveLicenca(db.Model):
     vendida_em = db.Column(db.DateTime, nullable=True)
     cobranca_id = db.Column(db.Integer, db.ForeignKey('cobrancas.id'), unique=True, nullable=True)
     cliente_email = db.Column(db.String(200), nullable=True)
-
-# NOVO: mapeada aqui só para debitar usos_atuais no momento certo (entrega
-# confirmada), em vez de na criação da cobrança em app.py. Ver process_mercado_pago_webhook.
-class Cupom(db.Model):
-    __tablename__ = "cupons"
-    id = db.Column(db.Integer, primary_key=True)
-    usos_atuais = db.Column(db.Integer, default=0)
 
 # REMOVIDO: supabase_synced - essa coluna não existe no banco local
 class Sale(db.Model):
@@ -502,19 +479,15 @@ def process_mercado_pago_webhook(payment_id):
         
         print(f"[WORKER] Processando pagamento {payment_id} | ExtRef: {external_ref}")
         
-        # Retry com backoff exponencial (1s, 2s, 4s, 8s, 16s — ANTES era fixo
-        # em 2s x5, o que sobrecarrega o DB igual em cada tentativa quando o
-        # problema é persistente).
+        # Retry com delay
         cobranca = None
-        max_tentativas = 5
-        for tentativa in range(max_tentativas):
+        for tentativa in range(5):
             cobranca = Cobranca.query.filter_by(external_reference=str(external_ref)).first()
             if cobranca:
                 break
-            if tentativa < max_tentativas - 1:
-                espera = 2 ** tentativa  # 1, 2, 4, 8s
-                logger.info(f"[WORKER] Tentativa {tentativa+1}: cobrança não encontrada, aguardando {espera}s...")
-                time.sleep(espera)
+            if tentativa < 4:
+                print(f"[WORKER] Tentativa {tentativa+1}: cobrança não encontrada, aguardando 2s...")
+                time.sleep(2)
                 db.session.expire_all()
         
         if not cobranca:
@@ -607,20 +580,10 @@ def process_mercado_pago_webhook(payment_id):
             try:
                 cobranca.status = "delivered"
                 db.session.add(cobranca)
-
-                # NOVO: débito do cupom acontece AQUI — na entrega confirmada —
-                # e não mais na criação da cobrança (app.py). Carrinho abandonado
-                # ou pagamento recusado não consome mais o limite de usos do cupom.
-                if cobranca.cupom_id:
-                    cupom = db.session.get(Cupom, cobranca.cupom_id)
-                    if cupom:
-                        cupom.usos_atuais = (cupom.usos_atuais or 0) + 1
-                        db.session.add(cupom)
-
                 db.session.commit()
-                logger.info(f"[WORKER] ✅ Cobrança/licença salvas.")
+                print(f"[WORKER] ✅ Cobrança/licença salvas.")
             except Exception as e:
-                logger.exception(f"[WORKER] ERRO ao salvar cobrança/licença: {e}")
+                print(f"[WORKER] ERRO ao salvar cobrança/licença: {e}")
                 db.session.rollback()
                 return
 
