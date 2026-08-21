@@ -4,7 +4,6 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from datetime import datetime, date, timedelta
 import os
-import logging
 import mercadopago
 import smtplib
 from email.mime.text import MIMEText
@@ -17,17 +16,10 @@ from sqlalchemy.orm import declarative_base
 from sqlalchemy import func
 import resend
 import requests as http_requests
-
-# ---------- LOGGING ----------
-logging.basicConfig(
-    level=os.environ.get("LOG_LEVEL", "INFO"),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger("broostore.app")
-
+ 
 # Inicialização do Flask
 app = Flask(__name__, static_folder='static')
-
+ 
 # Configuração de CORS
 NETLIFY_ORIGIN_PROD  = "https://rread.netlify.app"
 RENDER_ORIGIN        = "https://mercadopago-final.onrender.com"
@@ -39,55 +31,26 @@ CORS(app,
      methods=["GET", "POST", "OPTIONS"],
      allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
      supports_credentials=False)
-
-# ---------- SUPABASE (fonte da verdade do catálogo de produtos) ----------
-# ANTES: a URL e a anon key tinham um valor fixo hardcoded como fallback,
-# repetido em 4 lugares do arquivo. Isso impedia girar a chave sem caçar
-# todas as ocorrências no código. Agora são lidas 1x, aqui, e a aplicação
-# recusa subir se não estiverem configuradas (fail fast em vez de usar uma
-# chave antiga/errada silenciosamente).
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
-if not SUPABASE_URL or not SUPABASE_ANON_KEY:
-    raise RuntimeError(
-        "SUPABASE_URL e/ou SUPABASE_ANON_KEY não configuradas. Defina as "
-        "variáveis de ambiente antes de subir a aplicação — os valores fixos "
-        "que existiam no código-fonte foram removidos de propósito."
-    )
-
+ 
 # ---------- CONFIGURAÇÃO DO BANCO DE DADOS E EXTENSÕES ----------
 db_url = os.environ.get("DATABASE_URL", "sqlite:///cobrancas.db")
-
+ 
 if db_url and db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql+psycopg://", 1)
 elif db_url.startswith("postgresql://"):
     db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
-
+ 
 app.config["SQLALCHEMY_DATABASE_URI"] = db_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-
-# ANTES: fallback fixo e fraco ("asdf#FGSgvasgf$5$WGT") usado se a env var
-# faltasse. Agora é obrigatória — sem ela, a aplicação não sobe.
-_secret_key = os.environ.get("SECRET_KEY")
-if not _secret_key:
-    raise RuntimeError(
-        "SECRET_KEY não configurada. Gere uma chave forte e aleatória "
-        "(ex.: python -c \"import secrets; print(secrets.token_hex(32))\") "
-        "e defina-a na variável de ambiente antes de subir a aplicação."
-    )
-app.config["SECRET_KEY"] = _secret_key
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "asdf#FGSgvasgf$5$WGT")
  
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
-    "pool_pre_ping": True,
+    "pool_pre_ping": True, 
     "pool_recycle": 3600,
+    # Desliga prepared statements automáticos do psycopg (compatível com
+    # pooler de conexão em modo "transaction" — PgBouncer/Supabase/Render).
+    "connect_args": {"prepare_threshold": None},
 }
-# "prepare_threshold" é uma opção específica do driver psycopg (Postgres) —
-# desliga prepared statements automáticos, compatível com pooler de conexão
-# em modo "transaction" (PgBouncer/Supabase/Render). Só se aplica quando o
-# banco é Postgres; em SQLite (usado em testes/dev local) essa opção não
-# existe e quebrava a conexão. ANTES isso não era condicional.
-if db_url.startswith("postgresql"):
-    app.config["SQLALCHEMY_ENGINE_OPTIONS"]["connect_args"] = {"prepare_threshold": None}
  
 db = SQLAlchemy(app)
  
@@ -200,15 +163,7 @@ class Cobranca(db.Model):
     cupom_id = db.Column(db.Integer, db.ForeignKey('cupons.id'), nullable=True)  # NOVO
     cupom = db.relationship('Cupom')
     observacoes = db.Column(db.Text, nullable=True)  # JSON com endereco para produto fisico
-
-    # NOVO: campos reais para os códigos de uso único do compressor de PDF/imagem.
-    # ANTES esses atributos eram lidos/gravados via getattr(cobranca, "...", False)
-    # porque a coluna não existia no banco — ou seja, o "já foi usado" nunca era
-    # persistido de verdade. Rode migrations.sql (ALTER TABLE) ANTES de subir esta
-    # versão do código, senão as queries que leem estas colunas vão falhar.
-    compressao_usada = db.Column(db.Boolean, default=False, nullable=False)
-    compressao_img_usada = db.Column(db.Boolean, default=False, nullable=False)
-
+ 
     def to_dict(self):
         return {
             "id": self.id,
@@ -311,66 +266,10 @@ def validar_assinatura_webhook(request):
         return calculated_hash == hash_signature
             
     except Exception as e:
-        logger.exception("Erro ao validar assinatura do webhook")
+        print(f"Erro ao validar assinatura: {str(e)}")
         return False
-
-
-def sincronizar_produto_com_supabase(product_id_recebido, produto_local):
-    """Busca o produto atualizado na tabela `products` do Supabase (fonte da
-    verdade de preço/frete/tipo) e sincroniza com a tabela local `produtos`.
-
-    ANTES este bloco (~35 linhas) estava duplicado dentro de create_cobranca
-    e create_cobranca_cartao — qualquer correção precisava ser replicada nos
-    dois lugares. Agora é uma função única usada pelas duas rotas.
-
-    Mantém o mesmo comportamento de antes: se a chamada ao Supabase falhar,
-    NÃO derruba o checkout — segue com o que houver em cache local (produto
-    pode ser None se também não existir localmente). A falha é logada como
-    warning para poder ser monitorada/alertada.
-
-    Retorna (produto, tipo_autoritativo, frete_autoritativo, p_dados_frete).
-    """
-    tipo_autoritativo = produto_local.tipo if produto_local else None
-    frete_autoritativo = None
-    p_dados = {}
-
-    try:
-        resp = http_requests.get(
-            f"{SUPABASE_URL}/rest/v1/products?id=eq.{product_id_recebido}"
-            f"&select=id,title,price,link_pdf,frete,tipo,peso_kg,altura_cm,largura_cm,comprimento_cm",
-            headers={"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {SUPABASE_ANON_KEY}"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        rows = resp.json()
-
-        if rows:
-            p = rows[0]
-            tipo_autoritativo = (p.get("tipo") or "ebook").strip().lower()
-            frete_autoritativo = float(p.get("frete") or 0)
-            p_dados = {
-                "price": float(p.get("price") or 0),
-                "peso_kg": p.get("peso_kg"), "altura_cm": p.get("altura_cm"),
-                "largura_cm": p.get("largura_cm"), "comprimento_cm": p.get("comprimento_cm"),
-            }
-            if not produto_local:
-                produto_local = Produto(
-                    id=p["id"], nome=p["title"], preco=float(p["price"]),
-                    link_download=p.get("link_pdf") or "", tipo=tipo_autoritativo
-                )
-                db.session.add(produto_local)
-            else:
-                produto_local.preco = float(p["price"])
-                produto_local.nome = p["title"]
-                produto_local.link_download = p.get("link_pdf") or produto_local.link_download
-                produto_local.tipo = tipo_autoritativo
-            db.session.commit()
-    except Exception as e:
-        logger.warning(f"Falha ao sincronizar produto {product_id_recebido} com o Supabase: {e}")
-
-    return produto_local, tipo_autoritativo, frete_autoritativo, p_dados
-
-
+ 
+ 
 # ---------- ROTAS DA API ----------
  
 @app.route("/")
@@ -587,25 +486,19 @@ def validar_cupom():
 @app.route("/api/webhook", methods=["POST"])
 def webhook():
     try:
-        # ANTES: a validação de assinatura estava comentada, então qualquer
-        # POST forjado conseguia enfileirar jobs no worker (o worker ainda
-        # reconsulta o pagamento real na API do MP antes de liberar produto,
-        # mas isso não deveria ser a única barreira). Reativada abaixo —
-        # requer a env var WEBHOOK_SECRET (já existia, só não era usada).
-        if not validar_assinatura_webhook(request):
-            logger.warning("[WEBHOOK] Assinatura inválida ou ausente — requisição rejeitada.")
-            return jsonify({"status": "error", "message": "Assinatura inválida"}), 401
-
+        # if not validar_assinatura_webhook(request):
+        #    return jsonify({"status": "error", "message": "Assinatura inválida"}), 401
+ 
         dados = request.get_json()
         payment_id = dados.get("data", {}).get("id")
-
+        
         if payment_id:
             q.enqueue('worker.process_mercado_pago_webhook', payment_id)
-
+ 
         return jsonify({"status": "success", "message": "Webhook recebido e processamento enfileirado"}), 200
-
+        
     except Exception as e:
-        logger.exception("Erro ao processar webhook")
+        print(f"Erro ao processar webhook: {str(e)}")
         return jsonify({"status": "error", "message": f"Erro interno ao processar webhook: {str(e)}"}), 500
  
  
@@ -648,10 +541,48 @@ def create_cobranca():
         produto = db.session.get(Produto, int(product_id_recebido))
 
         # Valores autoritativos (fonte da verdade = Supabase). NUNCA confiar no cliente.
-        produto, tipo_autoritativo, frete_autoritativo, p_dados = sincronizar_produto_com_supabase(
-            product_id_recebido, produto
-        )
+        frete_autoritativo = None
+        tipo_autoritativo  = produto.tipo if produto else None
+        p_dados            = {}  # dados fisicos do Supabase para recotacao de frete
 
+        # Sempre sincroniza preço e dados com o Supabase (evita cache desatualizado)
+        try:
+            sb_url  = os.environ.get("SUPABASE_URL", "https://gyepvrzkwesohbagpgfa.supabase.co")
+            sb_key  = os.environ.get("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd5ZXB2cnprd2Vzb2hiYWdwZ2ZhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEzMDk5OTAsImV4cCI6MjA3Njg4NTk5MH0.ePwzEE8FjikLiTyjbtJXUtIIwFRlaSf5RYe7iKMDnTA")
+            resp = http_requests.get(
+                f"{sb_url}/rest/v1/products?id=eq.{product_id_recebido}&select=id,title,price,link_pdf,frete,tipo,peso_kg,altura_cm,largura_cm,comprimento_cm",
+                headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}
+            )
+            rows = resp.json()
+            if rows:
+                p = rows[0]
+                tipo_autoritativo  = (p.get("tipo") or "ebook").strip().lower()
+                frete_autoritativo = float(p.get("frete") or 0)
+                p_dados = {
+                    "price": float(p.get("price") or 0),
+                    "peso_kg": p.get("peso_kg"), "altura_cm": p.get("altura_cm"),
+                    "largura_cm": p.get("largura_cm"), "comprimento_cm": p.get("comprimento_cm"),
+                }
+                if not produto:
+                    # Produto novo: cria localmente
+                    produto = Produto(
+                        id=p["id"],
+                        nome=p["title"],
+                        preco=float(p["price"]),
+                        link_download=p.get("link_pdf") or "",
+                        tipo=tipo_autoritativo
+                    )
+                    db.session.add(produto)
+                else:
+                    # Produto existente: sempre atualiza preço/link/tipo do Supabase
+                    produto.preco         = float(p["price"])
+                    produto.nome          = p["title"]
+                    produto.link_download = p.get("link_pdf") or produto.link_download
+                    produto.tipo          = tipo_autoritativo
+                db.session.commit()
+        except Exception as e:
+            print(f"Erro ao sincronizar produto com Supabase: {e}")
+ 
         if not produto:
             return jsonify({"status": "error", "message": "Produto não encontrado."}), 404
  
@@ -666,12 +597,9 @@ def create_cobranca():
                 if valido and (cupom_obj.produto_id is None or cupom_obj.produto_id == int(product_id_recebido)):
                     resultado = cupom_obj.calcular_desconto(valor_original)
                     valor_final = resultado["valor_final"]
-                    # ANTES: cupom_obj.usos_atuais += 1 acontecia AQUI, na
-                    # geração do PIX — ou seja, todo carrinho abandonado ou
-                    # pagamento recusado também consumia o limite de usos do
-                    # cupom. O débito agora só acontece quando o worker
-                    # confirma a entrega (status "delivered"), em worker.py.
-
+                    cupom_obj.usos_atuais += 1
+                    db.session.add(cupom_obj)
+ 
         # --- FRETE AUTORITATIVO (recotado no servidor; fallback = frete fixo) ---
         is_fisico = (tipo_autoritativo == "fisico")
         if is_fisico and frete_autoritativo is None:
@@ -842,14 +770,16 @@ def sync_produto():
         return jsonify({"status": "error", "message": "product_id obrigatório"}), 400
  
     try:
+        sb_url = os.environ.get("SUPABASE_URL", "https://gyepvrzkwesohbagpgfa.supabase.co")
+        sb_key = os.environ.get("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd5ZXB2cnprd2Vzb2hiYWdwZ2ZhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEzMDk5OTAsImV4cCI6MjA3Njg4NTk5MH0.ePwzEE8FjikLiTyjbtJXUtIIwFRlaSf5RYe7iKMDnTA")
         resp = http_requests.get(
-            f"{SUPABASE_URL}/rest/v1/products?id=eq.{product_id}&select=id,title,price,link_pdf",
-            headers={"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {SUPABASE_ANON_KEY}"}
+            f"{sb_url}/rest/v1/products?id=eq.{product_id}&select=id,title,price,link_pdf",
+            headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}
         )
         rows = resp.json()
         if not rows:
             return jsonify({"status": "error", "message": "Produto não encontrado no Supabase"}), 404
-
+ 
         p = rows[0]
         produto = db.session.get(Produto, int(p["id"]))
         if produto:
@@ -865,13 +795,13 @@ def sync_produto():
                 tipo="ebook"
             )
             db.session.add(produto)
-
+ 
         db.session.commit()
-        logger.info(f"[sync-produto] id={p['id']} nome={p['title']} preco={p['price']}")
+        print(f"[sync-produto] id={p['id']} nome={p['title']} preco={p['price']}")
         return jsonify({"status": "ok", "preco": float(p["price"]), "nome": p["title"]})
-
+ 
     except Exception as e:
-        logger.exception("[sync-produto] Erro")
+        print(f"[sync-produto] Erro: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
  
 
@@ -903,11 +833,40 @@ def create_cobranca_cartao():
         if not product_id_rec:
             return jsonify({"status": "error", "message": "ID do produto é obrigatório."}), 400
 
-        # Busca/sincroniza produto (mesmo helper usado pela rota PIX)
+        # Busca/sincroniza produto
         produto = db.session.get(Produto, int(product_id_rec))
-        produto, tipo_autoritativo, frete_autoritativo, p_dados = sincronizar_produto_com_supabase(
-            product_id_rec, produto
-        )
+        frete_autoritativo = None
+        tipo_autoritativo  = produto.tipo if produto else None
+        p_dados            = {}  # dados fisicos do Supabase para recotacao de frete
+        try:
+            sb_url = os.environ.get("SUPABASE_URL", "https://gyepvrzkwesohbagpgfa.supabase.co")
+            sb_key = os.environ.get("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd5ZXB2cnprd2Vzb2hiYWdwZ2ZhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEzMDk5OTAsImV4cCI6MjA3Njg4NTk5MH0.ePwzEE8FjikLiTyjbtJXUtIIwFRlaSf5RYe7iKMDnTA")
+            resp = http_requests.get(
+                f"{sb_url}/rest/v1/products?id=eq.{product_id_rec}&select=id,title,price,link_pdf,frete,tipo,peso_kg,altura_cm,largura_cm,comprimento_cm",
+                headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}
+            )
+            rows = resp.json()
+            if rows:
+                p = rows[0]
+                tipo_autoritativo  = (p.get("tipo") or "ebook").strip().lower()
+                frete_autoritativo = float(p.get("frete") or 0)
+                p_dados = {
+                    "price": float(p.get("price") or 0),
+                    "peso_kg": p.get("peso_kg"), "altura_cm": p.get("altura_cm"),
+                    "largura_cm": p.get("largura_cm"), "comprimento_cm": p.get("comprimento_cm"),
+                }
+                if not produto:
+                    produto = Produto(id=p["id"], nome=p["title"], preco=float(p["price"]),
+                                      link_download=p.get("link_pdf") or "", tipo=tipo_autoritativo)
+                    db.session.add(produto)
+                else:
+                    produto.preco         = float(p["price"])
+                    produto.nome          = p["title"]
+                    produto.link_download = p.get("link_pdf") or produto.link_download
+                    produto.tipo          = tipo_autoritativo
+                db.session.commit()
+        except Exception as e:
+            print(f"[CARTAO] Erro ao sincronizar produto: {e}")
 
         if not produto:
             return jsonify({"status": "error", "message": "Produto não encontrado."}), 404
@@ -923,7 +882,8 @@ def create_cobranca_cartao():
                 if valido and (cupom_obj.produto_id is None or cupom_obj.produto_id == int(product_id_rec)):
                     resultado   = cupom_obj.calcular_desconto(valor_original)
                     valor_final = resultado["valor_final"]
-                    # Débito do uso do cupom só ocorre na entrega confirmada (worker.py) — ver nota na rota PIX acima.
+                    cupom_obj.usos_atuais += 1
+                    db.session.add(cupom_obj)
 
         # --- FRETE AUTORITATIVO (recotado no servidor; fallback = frete fixo) ---
         is_fisico = (tipo_autoritativo == "fisico")
@@ -1161,7 +1121,7 @@ def validar_codigo_compressao():
                             "message": "Código inválido para este serviço."}), 400
 
         # Verifica se o código já foi usado para uma compressão
-        if cobranca.compressao_usada:
+        if getattr(cobranca, "compressao_usada", False):
             return jsonify({"status": "erro",
                             "message": "Este código já foi utilizado."}), 400
 
@@ -1197,7 +1157,7 @@ def comprimir_pdf():
             return jsonify({"status": "erro",
                             "message": "Código inválido ou pagamento não confirmado."}), 403
 
-        if cobranca.compressao_usada:
+        if getattr(cobranca, "compressao_usada", False):
             return jsonify({"status": "erro",
                             "message": "Este código já foi utilizado."}), 400
 
@@ -1224,13 +1184,12 @@ def comprimir_pdf():
                 raise Exception("Falha ao gerar o arquivo comprimido.")
             print(f"[COMPRIMIR] ✅ Concluído.")
 
-            # Marca código como usado (coluna real agora — ver migrations.sql)
+            # Marca código como usado
             try:
                 cobranca.compressao_usada = True
                 db.session.commit()
             except Exception:
-                logger.exception("Falha ao marcar compressao_usada")
-                db.session.rollback()
+                pass  # campo pode não existir ainda; não bloqueia a entrega
 
             # Retorna o PDF comprimido
             from flask import send_file
@@ -1308,7 +1267,7 @@ def validar_codigo_compressao_imagem():
             return jsonify({"status": "erro",
                             "message": "Código inválido para este serviço."}), 400
 
-        if cobranca.compressao_img_usada:
+        if getattr(cobranca, "compressao_img_usada", False):
             return jsonify({"status": "erro",
                             "message": "Este código já foi utilizado."}), 400
 
@@ -1352,7 +1311,7 @@ def comprimir_imagem():
             return jsonify({"status": "erro",
                             "message": "Código inválido ou pagamento não confirmado."}), 403
 
-        if cobranca.compressao_img_usada:
+        if getattr(cobranca, "compressao_img_usada", False):
             return jsonify({"status": "erro",
                             "message": "Este código já foi utilizado."}), 400
 
@@ -1361,13 +1320,12 @@ def comprimir_imagem():
         buf, tamanho_kb = _comprimir_imagem_bytes(imagem)
         print(f"[COMPRIMIR-IMG] ✅ Resultado: {tamanho_kb:.0f} KB")
 
-        # Marca código como usado (coluna real agora — ver migrations.sql)
+        # Marca código como usado
         try:
             cobranca.compressao_img_usada = True
             db.session.commit()
         except Exception:
-            logger.exception("Falha ao marcar compressao_img_usada")
-            db.session.rollback()
+            pass  # campo pode não existir ainda; não bloqueia a entrega
 
         from flask import send_file
         return send_file(
@@ -1542,11 +1500,13 @@ def cotar_frete():
             return jsonify({"status": "error", "message": "product_id obrigatório."}), 400
 
         # Busca dados físicos do produto no Supabase (fonte da verdade)
+        sb_url = os.environ.get("SUPABASE_URL", "https://gyepvrzkwesohbagpgfa.supabase.co")
+        sb_key = os.environ.get("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd5ZXB2cnprd2Vzb2hiYWdwZ2ZhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEzMDk5OTAsImV4cCI6MjA3Njg4NTk5MH0.ePwzEE8FjikLiTyjbtJXUtIIwFRlaSf5RYe7iKMDnTA")
         try:
             resp = http_requests.get(
-                f"{SUPABASE_URL}/rest/v1/products?id=eq.{product_id}"
+                f"{sb_url}/rest/v1/products?id=eq.{product_id}"
                 f"&select=id,price,tipo,peso_kg,altura_cm,largura_cm,comprimento_cm",
-                headers={"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {SUPABASE_ANON_KEY}"},
+                headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"},
                 timeout=10
             )
             rows = resp.json()
